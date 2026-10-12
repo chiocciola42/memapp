@@ -223,7 +223,7 @@
     }
     .playcount .pc-value { font-family: 'Oswald', sans-serif; font-size: .74rem; font-weight: 700; color: var(--gold); }
 
-    .share-btn {
+    .share-btn, .fav-btn {
       display: inline-flex; align-items: center; justify-content: center;
       width: 28px; height: 28px; padding: 0;
       background: transparent; cursor: pointer;
@@ -231,8 +231,11 @@
       color: var(--muted);
       transition: color .2s, border-color .2s, opacity .2s;
     }
-    .share-btn:hover { color: var(--gold); border-color: rgba(240,165,0,.5); }
-    .share-btn svg { width: 14px; height: 14px; fill: currentColor; display: block; }
+    .share-btn:hover, .fav-btn:hover { color: var(--gold); border-color: rgba(240,165,0,.5); }
+    .share-btn svg, .fav-btn svg { width: 14px; height: 14px; fill: currentColor; display: block; }
+    .fav-btn.active { color: var(--gold); border-color: rgba(240,165,0,.5); }
+    .category-fav .category-name { display: inline-flex; align-items: center; gap: .4rem; }
+    .category-fav .category-name svg { width: 15px; height: 15px; fill: var(--gold); }
     .share-btn[disabled] { opacity: .45; cursor: progress; }
     .share-btn.busy svg { animation: pulse 1s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: .35; } }
@@ -313,8 +316,8 @@
       .pad-btn { width: 64px; height: 64px; }
       .tile-title { font-size: .8rem; }
       /* Area di tocco più generosa sui dispositivi mobili */
-      .share-btn { width: 34px; height: 34px; }
-      .share-btn svg { width: 16px; height: 16px; }
+      .share-btn, .fav-btn { width: 34px; height: 34px; }
+      .share-btn svg, .fav-btn svg { width: 16px; height: 16px; }
     }
   </style>
 </head>
@@ -379,7 +382,11 @@
     const ICO_PLAY  = `<svg viewBox="0 0 24 24" fill="white"><polygon points="6,3 20,12 6,21"/></svg>`;
     const ICO_PAUSE = `<svg viewBox="0 0 24 24" fill="white"><rect x="5" y="3" width="4" height="18" rx="1"/><rect x="14" y="3" width="4" height="18" rx="1"/></svg>`;
     const ICO_SHARE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16.08a2.9 2.9 0 0 0-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 1 0-3-3c0 .24.04.47.09.7L8.04 9.81A3 3 0 1 0 6 15c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65a2.92 2.92 0 1 0 2.92-2.92z"/></svg>`;
+    const ICO_STAR_OFF = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.27 6.83 20.4l1.37-5.88L3.64 10.6l6.02-.52L12 4.5l2.34 5.58 6.02.52-4.56 3.92 1.37 5.88L12 17.27zm0-2.3 3.2 1.93-.85-3.64 2.82-2.43-3.72-.32L12 7.1l-1.45 3.41-3.72.32 2.82 2.43-.85 3.64L12 14.97z"/></svg>`;
+    const ICO_STAR_ON  = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 17.27 6.18 3.73-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>`;
     const COUNTS_KEY        = 'memapp-playcounts';
+    const FAVS_KEY          = 'memapp-favorites';
+    const FAV_CATEGORY      = 'Preferiti';
     const LEGACY_KEY        = 'malesapp-playcounts';
     const DEFAULT_CATEGORY  = 'Generali';
 
@@ -407,6 +414,12 @@
         playCounts = legacy ? (JSON.parse(legacy) || {}) : {};
       }
     } catch (e) { playCounts = {}; }
+
+    let favorites = new Set();
+    try {
+      const storedFavs = JSON.parse(localStorage.getItem(FAVS_KEY) || '[]');
+      if (Array.isArray(storedFavs)) favorites = new Set(storedFavs.filter(f => typeof f === 'string'));
+    } catch (e) { favorites = new Set(); }
 
     /* ── SVG pallone da calcio ── */
     function ballSVG(id) {
@@ -537,6 +550,10 @@
       try { localStorage.setItem(COUNTS_KEY, JSON.stringify(playCounts)); } catch (e) { /* storage non disponibile */ }
     }
 
+    function persistFavorites() {
+      try { localStorage.setItem(FAVS_KEY, JSON.stringify(Array.from(favorites))); } catch (e) { /* storage non disponibile */ }
+    }
+
     function stopAll() {
       if (activeAudio) { activeAudio.pause(); activeAudio.currentTime = 0; }
       document.querySelectorAll('.tile').forEach(t => t.classList.remove('playing'));
@@ -566,6 +583,51 @@
       const categories = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b, 'it'));
 
       categories.forEach(cat => root.appendChild(buildCategorySection(cat, groups.get(cat))));
+      renderFavorites();
+    }
+
+    // La sezione Preferiti vive sempre in cima e compare solo se ci sono suoni marcati.
+    // Viene ricostruita da sola, così le tracce in riproduzione nelle altre categorie non vengono interrotte.
+    function renderFavorites() {
+      const root = document.getElementById('tracks');
+      const old  = root.querySelector('.category-fav');
+      const wasCollapsed = !!old && old.classList.contains('collapsed');
+
+      if (old) {
+        if (activeAudio && Array.from(old.querySelectorAll('.tile')).some(t => t._audio === activeAudio)) stopAll();
+        old.remove();
+      }
+
+      const items = tracks.filter(t => favorites.has(t.file));
+      if (items.length === 0) return;
+
+      const section = buildCategorySection(FAV_CATEGORY, items);
+      section.classList.add('category-fav');
+      section.querySelector('.category-name').innerHTML = ICO_STAR_ON + escHtml(FAV_CATEGORY);
+      if (wasCollapsed) {
+        section.classList.add('collapsed');
+        section.querySelector('.category-header').setAttribute('aria-expanded', 'false');
+      }
+      root.insertBefore(section, root.firstChild);
+    }
+
+    function setFavorite(track, on) {
+      if (on) favorites.add(track.file); else favorites.delete(track.file);
+      persistFavorites();
+      document.querySelectorAll('.fav-btn').forEach(b => {
+        if (b.dataset.file === track.file) syncFavButton(b, track);
+      });
+      renderFavorites();
+    }
+
+    function syncFavButton(btn, track) {
+      const on = favorites.has(track.file);
+      const label = (on ? 'Rimuovi dai preferiti ' : 'Aggiungi ai preferiti ') + track.name;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+      btn.innerHTML = on ? ICO_STAR_ON : ICO_STAR_OFF;
     }
 
     function buildCategorySection(category, items) {
@@ -609,8 +671,9 @@
         <div class="tile-actions">
           <div class="playcount">
             <span class="pc-label">play</span>
-            <span class="pc-value" id="pc${id}">${count}</span>
+            <span class="pc-value" id="pc${id}" data-file="${escHtml(track.file)}">${count}</span>
           </div>
+          <button type="button" class="fav-btn" data-file="${escHtml(track.file)}"></button>
           <button type="button" class="share-btn" title="Condividi ${escHtml(track.name)}" aria-label="Condividi ${escHtml(track.name)}">${ICO_SHARE}</button>
         </div>`;
 
@@ -622,9 +685,13 @@
 
       const padBtn   = tile.querySelector('.pad-btn');
       const overlay  = tile.querySelector('.pad-overlay');
-      const pcEl     = tile.querySelector('#pc' + id);
       const shareBtn = tile.querySelector('.share-btn');
 
+      const favBtn   = tile.querySelector('.fav-btn');
+
+      tile._audio = audio;
+      syncFavButton(favBtn, track);
+      favBtn.addEventListener('click', () => { setFavorite(track, !favorites.has(track.file)); });
       shareBtn.addEventListener('click', () => { shareTrack(track, shareBtn); });
 
       audio.addEventListener('ended', () => {
@@ -647,7 +714,9 @@
           activeAudio = audio;
 
           playCounts[track.file] = (playCounts[track.file] || 0) + 1;
-          pcEl.textContent = playCounts[track.file];
+          document.querySelectorAll('.pc-value').forEach(el => {
+            if (el.dataset.file === track.file) el.textContent = playCounts[track.file];
+          });
           persistCounts();
         } else {
           audio.pause();
