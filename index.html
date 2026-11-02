@@ -400,26 +400,36 @@
       m4a:  'audio/mp4'
     };
 
+    const TRACKS_TIMEOUT_MS = 10000;
+    const MAX_TRACKS        = 2000;
+
     let tracks      = [];
     let activeAudio = null;
     let uid = 0;
-    let playCounts = {};
 
-    try {
-      const stored = localStorage.getItem(COUNTS_KEY);
-      if (stored !== null) {
-        playCounts = JSON.parse(stored) || {};
-      } else {
-        const legacy = localStorage.getItem(LEGACY_KEY);
-        playCounts = legacy ? (JSON.parse(legacy) || {}) : {};
+    /* Lettura difensiva di localStorage: un valore assente, corrotto o un accesso negato restituisce il default. */
+    function readStored(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw === null ? fallback : (JSON.parse(raw) ?? fallback);
+      } catch (e) {
+        return fallback;
       }
-    } catch (e) { playCounts = {}; }
+    }
 
-    let favorites = new Set();
-    try {
-      const storedFavs = JSON.parse(localStorage.getItem(FAVS_KEY) || '[]');
-      if (Array.isArray(storedFavs)) favorites = new Set(storedFavs.filter(f => typeof f === 'string'));
-    } catch (e) { favorites = new Set(); }
+    function loadPlayCounts() {
+      const current = readStored(COUNTS_KEY, null);
+      const data    = current !== null ? current : readStored(LEGACY_KEY, {});
+      return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    }
+
+    function loadFavorites() {
+      const data = readStored(FAVS_KEY, []);
+      return new Set(Array.isArray(data) ? data.filter(f => typeof f === 'string') : []);
+    }
+
+    let playCounts = loadPlayCounts();
+    let favorites  = loadFavorites();
 
     /* ── SVG pallone da calcio ── */
     function ballSVG(id) {
@@ -554,15 +564,38 @@
       try { localStorage.setItem(FAVS_KEY, JSON.stringify(Array.from(favorites))); } catch (e) { /* storage non disponibile */ }
     }
 
+    /* Unico punto che sincronizza l'aspetto di una tile con lo stato di riproduzione. */
+    function setTilePlaying(tile, track, playing) {
+      tile.classList.toggle('playing', playing);
+      tile.querySelector('.pad-overlay').innerHTML = playing ? ICO_PAUSE : ICO_PLAY;
+      const btn = tile.querySelector('.pad-btn');
+      btn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+      btn.setAttribute('aria-label', (playing ? 'Pausa ' : 'Riproduci ') + track.name);
+    }
+
     function stopAll() {
       if (activeAudio) { activeAudio.pause(); activeAudio.currentTime = 0; }
-      document.querySelectorAll('.tile').forEach(t => t.classList.remove('playing'));
-      document.querySelectorAll('.pad-overlay').forEach(o => o.innerHTML = ICO_PLAY);
-      document.querySelectorAll('.pad-btn').forEach(b => {
-        b.setAttribute('aria-pressed', 'false');
-        b.setAttribute('aria-label', (b.getAttribute('aria-label') || '').replace(/^Pausa/, 'Riproduci'));
-      });
+      document.querySelectorAll('.tile.playing').forEach(t => setTilePlaying(t, t._track, false));
       activeAudio = null;
+    }
+
+    function incrementPlayCount(track) {
+      playCounts[track.file] = (playCounts[track.file] || 0) + 1;
+      document.querySelectorAll('.pc-value').forEach(el => {
+        if (el.dataset.file === track.file) el.textContent = playCounts[track.file];
+      });
+      persistCounts();
+    }
+
+    function startPlayback(tile, track, audio) {
+      setTilePlaying(tile, track, true);
+      activeAudio = audio;
+      audio.play().then(() => incrementPlayCount(track)).catch(() => {
+        // Riproduzione rifiutata (file non raggiungibile o bloccata dal browser): si ripristina l'interfaccia.
+        setTilePlaying(tile, track, false);
+        if (activeAudio === audio) activeAudio = null;
+        toast('Impossibile riprodurre: ' + track.name);
+      });
     }
 
     function groupByCategory(list) {
@@ -684,47 +717,30 @@
       audio.src     = src;
 
       const padBtn   = tile.querySelector('.pad-btn');
-      const overlay  = tile.querySelector('.pad-overlay');
       const shareBtn = tile.querySelector('.share-btn');
 
       const favBtn   = tile.querySelector('.fav-btn');
 
       tile._audio = audio;
+      tile._track = track;
       syncFavButton(favBtn, track);
       favBtn.addEventListener('click', () => { setFavorite(track, !favorites.has(track.file)); });
       shareBtn.addEventListener('click', () => { shareTrack(track, shareBtn); });
 
       audio.addEventListener('ended', () => {
         audio.currentTime = 0;
-        tile.classList.remove('playing');
-        overlay.innerHTML = ICO_PLAY;
-        padBtn.setAttribute('aria-pressed', 'false');
-        padBtn.setAttribute('aria-label', 'Riproduci ' + track.name);
-        activeAudio = null;
+        setTilePlaying(tile, track, false);
+        if (activeAudio === audio) activeAudio = null;
       });
 
       padBtn.addEventListener('click', () => {
-        if (activeAudio && activeAudio !== audio) stopAll();
-        if (audio.paused) {
-          audio.play().catch(() => {});
-          tile.classList.add('playing');
-          overlay.innerHTML = ICO_PAUSE;
-          padBtn.setAttribute('aria-pressed', 'true');
-          padBtn.setAttribute('aria-label', 'Pausa ' + track.name);
-          activeAudio = audio;
-
-          playCounts[track.file] = (playCounts[track.file] || 0) + 1;
-          document.querySelectorAll('.pc-value').forEach(el => {
-            if (el.dataset.file === track.file) el.textContent = playCounts[track.file];
-          });
-          persistCounts();
-        } else {
+        if (!audio.paused) {
           audio.pause();
-          tile.classList.remove('playing');
-          overlay.innerHTML = ICO_PLAY;
-          padBtn.setAttribute('aria-pressed', 'false');
-          padBtn.setAttribute('aria-label', 'Riproduci ' + track.name);
+          setTilePlaying(tile, track, false);
+          return;
         }
+        if (activeAudio && activeAudio !== audio) stopAll();
+        startPlayback(tile, track, audio);
       });
 
       return tile;
@@ -747,15 +763,32 @@
     });
 
     /* ── avvio: carica tracks.json ── */
-    (async () => {
+    function isValidTrack(t) {
+      return !!t && typeof t.name === 'string' && typeof t.file === 'string' && t.file !== '';
+    }
+
+    async function fetchTracks() {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), TRACKS_TIMEOUT_MS);
+      try {
+        const r = await fetch('tracks.json', { signal: ctrl.signal });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!Array.isArray(data)) throw new Error('formato non valido');
+        return data.filter(isValidTrack).slice(0, MAX_TRACKS);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function boot() {
       setUI('loading');
       try {
-        const r = await fetch('tracks.json');
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        tracks = await r.json();
+        tracks = await fetchTracks();
       } catch (e) {
         document.getElementById('loading').style.display = 'none';
-        showError('Impossibile caricare le tracce: ' + e.message);
+        const reason = e.name === 'AbortError' ? 'tempo scaduto' : e.message;
+        showError('Impossibile caricare le tracce: ' + reason);
         return;
       }
 
@@ -763,7 +796,9 @@
 
       renderTracks();
       setUI('loaded');
-    })();
+    }
+
+    boot();
 
   })();
   </script>

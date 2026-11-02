@@ -1,6 +1,6 @@
 /* MemAPP service worker — generato da build.js (sw.template.js -> sw.js).
  * Non modificare sw.js a mano: la versione viene stampata a ogni build. */
-const VERSION      = '76261be6a4d5';
+const VERSION      = 'e306a109448d';
 const SHELL_CACHE  = 'memapp-shell-' + VERSION;
 const AUDIO_CACHE  = 'memapp-audio-v1';
 const FONT_CACHE   = 'memapp-fonts-v1';
@@ -71,14 +71,14 @@ self.addEventListener('fetch', event => {
 /* ── Navigazione: rete con timeout, fallback all'app shell in cache ── */
 async function handleNavigation(req) {
   const shell = () => caches.match('/', { ignoreSearch: true });
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), NAV_TIMEOUT_MS);
   try {
-    const res = await Promise.race([
-      fetch(req),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), NAV_TIMEOUT_MS))
-    ]);
-    return res;
+    return await fetch(req, { signal: ctrl.signal });
   } catch (e) {
     return (await shell()) || fetch(req);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -92,7 +92,7 @@ async function networkFirst(req) {
   const cache = await caches.open(SHELL_CACHE);
   try {
     const res = await fetch(req, { cache: 'no-cache' });
-    if (res.ok) cache.put(req, res.clone());
+    if (res.ok) await cache.put(req, res.clone());
     return res;
   } catch (e) {
     const hit = await cache.match(req);
@@ -104,10 +104,10 @@ async function networkFirst(req) {
 async function staleWhileRevalidate(req, cacheName) {
   const cache = await caches.open(cacheName);
   const hit   = await cache.match(req);
-  const net   = fetch(req).then(res => {
-    if (res.ok || res.type === 'opaque') cache.put(req, res.clone());
+  const net   = fetch(req).then(async res => {
+    if (res.ok || res.type === 'opaque') await cache.put(req, res.clone());
     return res;
-  }).catch(() => null);
+  }).catch(() => null); // rete assente: si usa la copia in cache, se c'è
   return hit || (await net) || Response.error();
 }
 
@@ -127,7 +127,7 @@ async function handleAudio(req) {
       return net.status === 200 && req.headers.has('range') ? rangeResponse(net, req.headers.get('range')) : net;
     }
     await cache.put(req.url, net);
-    trimCache(cache);
+    await trimCache(cache);
     res = await cache.match(req.url);
   }
 
