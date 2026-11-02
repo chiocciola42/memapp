@@ -11,53 +11,57 @@ const AUDIO_DIR         = 'audio';
 const AUDIO_EXT         = /\.(wav|mp3|ogg|flac|aac|m4a)$/i;
 const DEFAULT_CATEGORY  = 'Generali';
 
+function toTrack(dirPath, fileName, category) {
+  const ext = path.extname(fileName);
+  return {
+    name:     path.basename(fileName, ext),
+    file:     `${dirPath}/${fileName}`,
+    badge:    ext.slice(1).toUpperCase(),
+    category
+  };
+}
+
+function audioFilesIn(dirPath) {
+  return fs.readdirSync(dirPath).filter(f => AUDIO_EXT.test(f));
+}
+
 function collectTracks() {
   if (!fs.existsSync(AUDIO_DIR)) return [];
 
-  const tracks  = [];
-  const entries = fs.readdirSync(AUDIO_DIR, { withFileTypes: true });
-
-  entries.forEach(entry => {
+  const tracks = [];
+  for (const entry of fs.readdirSync(AUDIO_DIR, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      const category = entry.name;
-      const dirPath  = path.join(AUDIO_DIR, entry.name);
-
-      fs.readdirSync(dirPath)
-        .filter(f => AUDIO_EXT.test(f))
-        .forEach(f => tracks.push({
-          name:     path.basename(f, path.extname(f)),
-          file:     `${dirPath}/${f}`.split(path.sep).join('/'),
-          badge:    path.extname(f).slice(1).toUpperCase(),
-          category
-        }));
-    } else if (entry.isFile() && AUDIO_EXT.test(entry.name)) {
-      tracks.push({
-        name:     path.basename(entry.name, path.extname(entry.name)),
-        file:     `${AUDIO_DIR}/${entry.name}`,
-        badge:    path.extname(entry.name).slice(1).toUpperCase(),
-        category: DEFAULT_CATEGORY
-      });
+      const dirPath = `${AUDIO_DIR}/${entry.name}`;
+      audioFilesIn(dirPath).forEach(f => tracks.push(toTrack(dirPath, f, entry.name)));
+      continue;
     }
-  });
-
+    if (entry.isFile() && AUDIO_EXT.test(entry.name)) {
+      tracks.push(toTrack(AUDIO_DIR, entry.name, DEFAULT_CATEGORY));
+    }
+  }
   return tracks;
 }
 
-const tracks = collectTracks().sort((a, b) =>
-  a.category.localeCompare(b.category, 'it') || a.name.localeCompare(b.name, 'it')
-);
+function sortTracks(tracks) {
+  return tracks.sort((a, b) =>
+    a.category.localeCompare(b.category, 'it') || a.name.localeCompare(b.name, 'it')
+  );
+}
 
-fs.writeFileSync('tracks.json', JSON.stringify(tracks, null, 2), 'utf8');
+function writeTracks() {
+  const tracks = sortTracks(collectTracks());
+  fs.writeFileSync('tracks.json', JSON.stringify(tracks, null, 2), 'utf8');
 
-console.log(`tracks.json generato: ${tracks.length} traccia/e`);
-let lastCategory = null;
-tracks.forEach(t => {
-  if (t.category !== lastCategory) {
-    console.log(`\n[${t.category}]`);
-    lastCategory = t.category;
+  console.log(`tracks.json generato: ${tracks.length} traccia/e`);
+  let lastCategory = null;
+  for (const t of tracks) {
+    if (t.category !== lastCategory) {
+      console.log(`\n[${t.category}]`);
+      lastCategory = t.category;
+    }
+    console.log(`  - ${t.name}`);
   }
-  console.log(`  - ${t.name}`);
-});
+}
 
 // ── Service worker ──────────────────────────────────────────────────────────
 // sw.js viene generato da sw.template.js stampando una versione calcolata sul contenuto dell'app shell:
@@ -75,13 +79,31 @@ const SHELL_FILES = [
   { url: '/icons/favicon.svg',             file: 'icons/favicon.svg' }
 ];
 
-const hash = crypto.createHash('sha1');
-SHELL_FILES.forEach(f => { if (f.file) hash.update(f.url).update(fs.readFileSync(f.file)); });
-const version = hash.digest('hex').slice(0, 12);
+function shellVersion() {
+  const hash = crypto.createHash('sha1');
+  for (const f of SHELL_FILES) {
+    if (f.file) hash.update(f.url).update(fs.readFileSync(f.file));
+  }
+  return hash.digest('hex').slice(0, 12);
+}
 
-const swSource = fs.readFileSync('sw.template.js', 'utf8')
-  .replace('__BUILD_VERSION__', version)
-  .replace('__SHELL_URLS__', JSON.stringify(SHELL_FILES.map(f => f.url), null, 2));
-fs.writeFileSync('sw.js', swSource, 'utf8');
+function writeServiceWorker() {
+  const version  = shellVersion();
+  const template = fs.readFileSync('sw.template.js', 'utf8');
+  if (!template.includes('__BUILD_VERSION__') || !template.includes('__SHELL_URLS__')) {
+    throw new Error('sw.template.js: segnaposto mancanti');
+  }
+  const swSource = template
+    .replace('__BUILD_VERSION__', version)
+    .replace('__SHELL_URLS__', JSON.stringify(SHELL_FILES.map(f => f.url), null, 2));
+  fs.writeFileSync('sw.js', swSource, 'utf8');
+  console.log(`\nsw.js generato: versione ${version}`);
+}
 
-console.log(`\nsw.js generato: versione ${version}`);
+try {
+  writeTracks();
+  writeServiceWorker();
+} catch (e) {
+  console.error('Build fallita:', e.message);
+  process.exit(1);
+}
